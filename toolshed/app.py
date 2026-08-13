@@ -448,8 +448,45 @@ def _fmt_size(n: int) -> str:
     return f"{n}b" if n < 1024 else (f"{n / 1024:.1f}kb" if n < 1024**2 else f"{n / 1024**2:.1f}mb")
 
 
+def _page(title_cmd: str, sub: str, body: str) -> str:
+    return (
+        f"<!doctype html><html><head><meta charset='utf-8'><title>toolshed</title>"
+        f"<style>{_SHED_CSS}</style></head><body>"
+        f"<h1>{title_cmd}</h1><div class='sub'>{sub}</div>{body}</body></html>"
+    )
+
+
+import asyncio as _asyncio
+
+# Snapshot the MCP tool roster once at import — tools are compiled in, the
+# roster can't change at runtime.
+_TOOL_ROSTER = [
+    (t.name, (t.description or "").split("\n")[0].strip())
+    for t in _asyncio.run(mcp.list_tools())
+]
+
+
 @app.get("/shed", response_class=HTMLResponse)
-def shed_admin():
+def shed_home():
+    rows = recent_artifacts(1000)
+    tools = "".join(
+        f"<tr><td><a href='/mcp'>{name}</a></td><td class='type'>mcp + rest</td>"
+        f"<td>{html_mod.escape(desc)}</td></tr>"
+        for name, desc in _TOOL_ROSTER
+    )
+    body = (
+        "<table><tr><th>tool</th><th>transport</th><th>description</th></tr>"
+        + tools
+        + "</table>"
+        + f"<div class='sub' style='margin-top:2em'>storage: "
+        f"<a href='/shed/artifacts'>{len(rows)} artifact{'s' if len(rows) != 1 else ''}</a> · "
+        f"{_fmt_size(sum(r['size'] for r in rows))}</div>"
+    )
+    return _page("$ ls ~/toolshed", f"{len(_TOOL_ROSTER)} tools · self-hosted · no quotas", body)
+
+
+@app.get("/shed/artifacts", response_class=HTMLResponse)
+def shed_artifacts():
     rows = recent_artifacts(200)
     total = _fmt_size(sum(r["size"] for r in rows))
     if rows:
@@ -473,20 +510,18 @@ def shed_admin():
         )
     else:
         table = "<div class='empty'>the shed is empty — agents haven't stored anything yet</div>"
-    return (
-        f"<!doctype html><html><head><meta charset='utf-8'><title>toolshed</title>"
-        f"<style>{_SHED_CSS}</style></head><body>"
-        f"<h1>$ ls ~/toolshed</h1>"
-        f"<div class='sub'>{len(rows)} artifact{'s' if len(rows) != 1 else ''} · {total} · "
-        f"immutable · deletion is human-only</div>"
-        f"{table}</body></html>"
+    return _page(
+        "$ ls ~/toolshed/artifacts",
+        f"<a href='/shed'>&larr; shed</a> · {len(rows)} artifact{'s' if len(rows) != 1 else ''} · {total} · "
+        "immutable · deletion is human-only",
+        table,
     )
 
 
 @app.post("/shed/delete")
 def shed_delete(artifact_id: str = Form(...)):
     delete_artifact(_normalize_artifact_id(artifact_id))
-    return RedirectResponse("/shed", status_code=303)
+    return RedirectResponse("/shed/artifacts", status_code=303)
 
 
 @app.delete("/artifacts/{artifact_id}")
