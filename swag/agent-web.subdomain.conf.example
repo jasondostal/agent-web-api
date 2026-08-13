@@ -1,0 +1,48 @@
+## Version 2026/08/12 — agent web access: SearXNG (search) + trafilatura-api (fetch)
+# Single host, path-routed: /fetch + /healthz -> trafilatura-api, rest -> searxng.
+# JSON search API: https://web.homelab.example/search?q=...&format=json
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+
+    # LAN-only: no external access
+    if ($lan-ip != yes) { return 418; }
+
+    server_name web.*;
+
+    root /config/www;
+    error_page 418 = @teapot;
+
+    include /config/nginx/ssl.conf;
+
+    client_max_body_size 0;
+
+    # trafilatura-api — URL -> clean markdown (proxy.conf read timeout 240s covers
+    # slow origin sites).
+    location ~ ^/(fetch|healthz) {
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app trafilatura-api;
+        set $upstream_port 8080;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+
+    # everything else -> searxng (UI at /, JSON API at /search)
+    location / {
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app searxng;
+        set $upstream_port 8080;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+
+    location @teapot {
+        internal;
+        default_type text/html;
+        root /config/www;
+        try_files /custom_418.html =418;
+    }
+}

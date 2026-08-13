@@ -1,0 +1,29 @@
+# SearXNG for agent web_search — LAN-only behind SWAG at web.homelab.example.
+# limiter stays OFF: the limiter exists to fight public-instance abuse and its
+# bot-detection blocks exactly the non-browser JSON API calls our agents make.
+# Access control is SWAG's RFC1918 allow-list, not this layer.
+use_default_settings: true
+
+server:
+  secret_key: "CHANGE-ME-openssl-rand-hex-32"  # generate your own: openssl rand -hex 32
+  base_url: "https://web.homelab.example/"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: bing
+    disabled: false
