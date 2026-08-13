@@ -6,7 +6,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 
-RUN useradd -m appuser
+RUN useradd -m appuser && mkdir -p /data && chown appuser /data
+ENV DATA_DIR=/data
 USER appuser
 
 EXPOSE 8080

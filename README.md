@@ -5,8 +5,10 @@
 Coding agents want two web capabilities: *search* (query → ranked URLs) and *fetch* (URL → clean
 markdown). The hosted options — Brave Search API, Exa, Tavily, Firecrawl — are metered cloud
 services. This repo is the ~$0 homelab alternative: [SearXNG](https://github.com/searxng/searxng)
-for the search half, a ~100-line FastAPI wrapper around
-[trafilatura](https://github.com/adbar/trafilatura) for the fetch half, one reverse-proxy vhost
+for the search half and **toolshed** — a small FastAPI service wrapping
+[trafilatura](https://github.com/adbar/trafilatura) (HTML) and
+[pymupdf4llm](https://github.com/pymupdf/RAG) (PDF) for the fetch half, plus a
+Claude-style artifact store (immutable documents at unguessable capability URLs) — one reverse-proxy vhost
 routing both under a single hostname, and a [pi](https://github.com/badlogic/pi-mono) extension
 wiring them in as `web_search` / `web_fetch` tools. Total footprint: ~230MiB RAM.
 
@@ -18,14 +20,17 @@ One internal hostname (examples below use `web.homelab.example`), path-routed at
 |------|---------|---------|
 | `/` | searxng | Search UI (browser) |
 | `/search?q=...&format=json` | searxng | JSON search API (agents) |
-| `/fetch?url=...` | trafilatura-api | URL → clean markdown JSON |
-| `/mcp` | trafilatura-api | MCP (Streamable HTTP): `web_search` + `web_fetch` tools |
-| `/healthz` | trafilatura-api | Liveness |
+| `/fetch?url=...` | toolshed | URL → clean markdown JSON (HTML or PDF) |
+| `/mcp` | toolshed | MCP (Streamable HTTP): `web_search`, `web_fetch`, `store_artifact`, `get_artifact`, `list_artifacts` |
+| `/a/{id}` | toolshed | Serve a stored artifact (renders in browser) |
+| `/artifacts` | toolshed | Store (POST) / list (GET) artifacts |
+| `/healthz` | toolshed | Liveness |
 
 - **SearXNG** — metasearch over Google/Bing/DDG/Brave. Its rate limiter is OFF on purpose: the
   limiter's bot detection blocks exactly the non-browser JSON calls agents make. Access control
   belongs at the proxy (LAN allow-list) instead. Config in `searxng/settings.yml`.
-- **trafilatura-api** — FastAPI wrapper (`trafilatura-api/`). Returns title/author/date + markdown.
+- **toolshed** (`toolshed/`) — FastAPI + FastMCP. `web_fetch` returns title/author/date + markdown
+  for HTML pages and PDFs (content-type sniffed).
   SSRF guard refuses private/loopback targets so a prompt-injected agent can't probe your LAN
   through it (`ALLOW_PRIVATE=1` to disable). `MAX_CONTENT_CHARS` truncates (default 400k).
 - **Proxy vhost** — `swag/agent-web.subdomain.conf.example` (linuxserver SWAG flavored nginx):
@@ -45,8 +50,12 @@ searxng:
     - ./searxng:/etc/searxng
   mem_limit: 512m
 
-trafilatura-api:
-  build: ./trafilatura-api
+toolshed:
+  build: ./toolshed
+  environment:
+    - PUBLIC_BASE=https://web.homelab.example
+  volumes:
+    - ./data/toolshed:/data
   # external DNS if your LAN resolver runs blocklists — ad-list entries
   # break legit article fetches
   dns: [1.1.1.1, 8.8.8.8]
@@ -62,7 +71,7 @@ trafilatura-api:
 ## MCP clients (Claude Code, LM Studio, anything MCP-native)
 
 The same two tools are served over MCP Streamable HTTP at `/mcp` — [FastMCP](https://github.com/jlowin/fastmcp)
-mounted inside the trafilatura-api container, no extra service. Point any MCP host at it:
+mounted inside the toolshed container, no extra service. Point any MCP host at it:
 
 ```json
 {
