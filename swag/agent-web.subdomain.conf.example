@@ -29,6 +29,19 @@ server {
         proxy_pass $upstream_proto://$upstream_app:$upstream_port;
     }
 
+    # MCP (Streamable HTTP) — SSE responses; buffering must be off or the
+    # event stream stalls behind the proxy.
+    location /mcp {
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app trafilatura-api;
+        set $upstream_port 8080;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+
     # everything else -> searxng (UI at /, JSON API at /search)
     location / {
         include /config/nginx/proxy.conf;

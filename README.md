@@ -19,6 +19,7 @@ One internal hostname (examples below use `web.homelab.example`), path-routed at
 | `/` | searxng | Search UI (browser) |
 | `/search?q=...&format=json` | searxng | JSON search API (agents) |
 | `/fetch?url=...` | trafilatura-api | URL → clean markdown JSON |
+| `/mcp` | trafilatura-api | MCP (Streamable HTTP): `web_search` + `web_fetch` tools |
 | `/healthz` | trafilatura-api | Liveness |
 
 - **SearXNG** — metasearch over Google/Bing/DDG/Brave. Its rate limiter is OFF on purpose: the
@@ -57,6 +58,23 @@ trafilatura-api:
 3. Point internal DNS at your proxy.
 4. Smoke test: `curl 'https://web.homelab.example/search?q=test&format=json'` and
    `curl 'https://web.homelab.example/fetch?url=https://example.com'`.
+
+## MCP clients (Claude Code, LM Studio, anything MCP-native)
+
+The same two tools are served over MCP Streamable HTTP at `/mcp` — [FastMCP](https://github.com/jlowin/fastmcp)
+mounted inside the trafilatura-api container, no extra service. Point any MCP host at it:
+
+```json
+{
+  "mcpServers": {
+    "homelab-web": { "url": "https://web.homelab.example/mcp" }
+  }
+}
+```
+
+LM Studio: Program tab → Install → Edit mcp.json (0.3.17+). Claude Code:
+`claude mcp add --transport http homelab-web https://web.homelab.example/mcp`.
+Keep the endpoint LAN-only at the proxy; the MCP layer itself is unauthenticated.
 
 ## pi integration
 
