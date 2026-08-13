@@ -17,6 +17,7 @@ targets unless ALLOW_PRIVATE=1 (agents fetching arbitrary URLs shouldn't be
 able to probe the LAN through this box).
 """
 
+import html as html_mod
 import ipaddress
 import os
 import socket
@@ -29,8 +30,8 @@ import httpx
 import pymupdf
 import pymupdf4llm
 import trafilatura
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastmcp import FastMCP
 from pydantic import BaseModel
 
@@ -250,6 +251,17 @@ def recent_artifacts(limit: int = 50) -> list[dict]:
     return [dict(zip(("id", "title", "content_type", "size", "created"), r)) for r in rows]
 
 
+def delete_artifact(artifact_id: str) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        cur = db.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+    if cur.rowcount == 0:
+        raise HTTPException(404, "no such artifact")
+    try:
+        os.remove(_artifact_path(artifact_id))
+    except FileNotFoundError:
+        pass
+
+
 def _normalize_artifact_id(id_or_url: str) -> str:
     s = id_or_url.strip()
     if "/" in s:
@@ -401,6 +413,86 @@ def serve_artifact(artifact_id: str):
     if ctype == "text/markdown":
         ctype = "text/plain; charset=utf-8"
     return Response(content=content, media_type=ctype, headers=headers)
+
+
+# --- admin: the shed inventory ---------------------------------------------
+# Zero-JS on purpose (strict CSP proxies silently kill inline scripts).
+# Deletion is deliberately human-only: there is no MCP delete tool — agents
+# can publish artifacts, only a person at this page can destroy them.
+
+_SHED_CSS = """
+:root{--night:#081210;--panel:#0d1a16;--line:#1c312a;--mallard:#2bd98e;
+--lantern:#ffb454;--bone:#d8e7de;--reed:#5f7a6e}
+*{box-sizing:border-box;margin:0}
+body{background:var(--night);color:var(--bone);font-family:ui-monospace,Menlo,monospace;
+padding:2.5em 1.5em;max-width:1000px;margin:0 auto}
+h1{color:var(--mallard);font-size:1.3em;margin-bottom:.25em}
+.sub{color:var(--reed);margin-bottom:2em}
+table{width:100%;border-collapse:collapse}
+th{color:var(--lantern);text-align:left;padding:.5em .75em;border-bottom:1px solid var(--line);
+font-size:.85em;text-transform:uppercase;letter-spacing:.08em}
+td{padding:.55em .75em;border-bottom:1px solid var(--line);font-size:.9em;vertical-align:top}
+tr:hover td{background:var(--panel)}
+a{color:var(--mallard);text-decoration:none}
+a:hover{text-decoration:underline}
+.guid{color:var(--reed);font-size:.8em}
+.type{color:var(--lantern);font-size:.8em}
+.del button{background:none;border:1px solid var(--line);color:var(--reed);
+font-family:inherit;font-size:.8em;padding:.25em .6em;cursor:pointer;border-radius:3px}
+.del button:hover{border-color:#e05252;color:#e05252}
+.empty{color:var(--reed);padding:3em 0;text-align:center}
+"""
+
+
+def _fmt_size(n: int) -> str:
+    return f"{n}b" if n < 1024 else (f"{n / 1024:.1f}kb" if n < 1024**2 else f"{n / 1024**2:.1f}mb")
+
+
+@app.get("/shed", response_class=HTMLResponse)
+def shed_admin():
+    rows = recent_artifacts(200)
+    total = _fmt_size(sum(r["size"] for r in rows))
+    if rows:
+        body = "".join(
+            f"<tr>"
+            f"<td><a href='/a/{r['id']}'>{html_mod.escape(r['title'] or '(untitled)')}</a>"
+            f"<div class='guid'>{r['id']}</div></td>"
+            f"<td class='type'>{html_mod.escape(r['content_type'])}</td>"
+            f"<td>{_fmt_size(r['size'])}</td>"
+            f"<td class='guid'>{r['created']}</td>"
+            f"<td class='del'><form method='post' action='/shed/delete'>"
+            f"<input type='hidden' name='artifact_id' value='{r['id']}'>"
+            f"<button>delete</button></form></td>"
+            f"</tr>"
+            for r in rows
+        )
+        table = (
+            "<table><tr><th>artifact</th><th>type</th><th>size</th><th>created</th><th></th></tr>"
+            + body
+            + "</table>"
+        )
+    else:
+        table = "<div class='empty'>the shed is empty — agents haven't stored anything yet</div>"
+    return (
+        f"<!doctype html><html><head><meta charset='utf-8'><title>toolshed</title>"
+        f"<style>{_SHED_CSS}</style></head><body>"
+        f"<h1>$ ls ~/toolshed</h1>"
+        f"<div class='sub'>{len(rows)} artifact{'s' if len(rows) != 1 else ''} · {total} · "
+        f"immutable · deletion is human-only</div>"
+        f"{table}</body></html>"
+    )
+
+
+@app.post("/shed/delete")
+def shed_delete(artifact_id: str = Form(...)):
+    delete_artifact(_normalize_artifact_id(artifact_id))
+    return RedirectResponse("/shed", status_code=303)
+
+
+@app.delete("/artifacts/{artifact_id}")
+def rest_delete(artifact_id: str):
+    delete_artifact(artifact_id)
+    return JSONResponse({"deleted": artifact_id})
 
 
 app.mount("/", mcp_app)
