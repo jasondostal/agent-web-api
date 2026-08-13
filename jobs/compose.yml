@@ -1,0 +1,26 @@
+# jobs orchestrator — runs on the box whose dockerd will host the job
+# containers (a dev box works well), not necessarily the same host as
+# toolshed. Toolshed proxies /jobs here (JOBS_URL env). Keep it LAN-bound;
+# never expose it at the reverse proxy.
+#
+# Secrets: an env file outside the repo (chmod 600) carrying the model API
+# keys the MODELS map in app.py expects (DEEPSEEK_API_KEY, ...). Keys are
+# passed to job containers at spawn, never baked into images.
+services:
+  jobs:
+    build: .
+    image: jobs:latest
+    container_name: jobs
+    restart: unless-stopped
+    ports:
+      - "8815:8815"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+    env_file:
+      - ~/.jobs.env
+    environment:
+      - TOOLSHED_URL=https://web.homelab.example
+      # How runner containers reach back here for progress reports — must be
+      # an address reachable from a container (host LAN IP, not localhost).
+      - JOBS_URL_FOR_RUNNER=http://jobs-host.homelab.example:8815

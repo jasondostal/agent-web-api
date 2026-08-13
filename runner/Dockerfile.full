@@ -1,0 +1,12 @@
+# job-runner:full — lite + Playwright/Chromium for browser jobs.
+FROM job-runner:lite
+
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pip install --no-cache-dir playwright \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
+USER agent
+WORKDIR /workspace
+ENTRYPOINT ["python", "/opt/runner/runner.py"]

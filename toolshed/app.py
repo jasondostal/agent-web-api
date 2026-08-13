@@ -40,6 +40,7 @@ MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "400000"))
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(25 * 1024 * 1024)))
 MAX_ARTIFACT_BYTES = int(os.environ.get("MAX_ARTIFACT_BYTES", str(10 * 1024 * 1024)))
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
+JOBS_URL = os.environ.get("JOBS_URL", "http://jobs:8815").rstrip("/")
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "http://localhost:8080").rstrip("/")
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
@@ -269,6 +270,21 @@ def _normalize_artifact_id(id_or_url: str) -> str:
     return s
 
 
+# --- jobs (proxied to the orchestrator on the dev box) ---------------------
+# Toolshed is the front door only: submit + read. The runner's progress
+# PATCH goes to the orchestrator directly on the LAN, never through here.
+
+
+def jobs_request(method: str, path: str, **kw):
+    try:
+        r = httpx.request(method, f"{JOBS_URL}{path}", timeout=15, **kw)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"jobs service unreachable: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, r.text[:500])
+    return r
+
+
 # --- MCP transport ---------------------------------------------------------
 
 mcp = FastMCP(
@@ -359,6 +375,39 @@ def list_artifacts(limit: int = 20) -> str:
     )
 
 
+@mcp.tool
+def run_job(prompt: str, model: str = "deepseek", image: str = "lite") -> str:
+    """Launch an ephemeral agent job: a fully-empowered agent runs your prompt
+    in a disposable container (bash, files, pytest; image="full" adds
+    Playwright/Chromium), stores its results as artifacts, and exits. Returns
+    the job id — poll job_status until it finishes."""
+    try:
+        r = jobs_request("POST", "/jobs", json={"prompt": prompt, "model": model, "image": image})
+    except HTTPException as e:
+        return f"run_job failed: {e.detail}"
+    job_id = r.json()["job_id"]
+    return f"Job {job_id} queued. Check progress with job_status(\"{job_id}\")."
+
+
+@mcp.tool
+def job_status(job_id: str) -> str:
+    """Check an agent job's state, turns/tokens used, and artifact URLs."""
+    try:
+        d = jobs_request("GET", f"/jobs/{job_id}").json()
+    except HTTPException as e:
+        return f"job_status failed: {e.detail}"
+    lines = [
+        f"Job {d['id']}: {d['state']}"
+        + (f" (exit {d['exit_code']})" if d["exit_code"] is not None else ""),
+        f"model {d['model']} · image {d['image']} · turns {d['turns']} · tokens {d['tokens']}",
+        f"created {d['created']}" + (f" · ended {d['ended']}" if d["ended"] else ""),
+    ]
+    if d.get("error"):
+        lines.append(f"error: {d['error']}")
+    lines += [f"artifact: {u}" for u in d["artifact_urls"]]
+    return "\n".join(lines)
+
+
 mcp_app = mcp.http_app(path="/mcp")
 
 # --- REST transport --------------------------------------------------------
@@ -400,6 +449,34 @@ def post_artifact(a: ArtifactIn):
 @app.get("/artifacts")
 def get_artifacts(limit: int = Query(50, le=200)):
     return JSONResponse(recent_artifacts(limit))
+
+
+class JobIn(BaseModel):
+    prompt: str
+    model: str = "deepseek"
+    image: str = "lite"
+    repo: Optional[str] = None
+    caps: dict = {}
+
+
+@app.post("/jobs")
+def post_job(j: JobIn):
+    return JSONResponse(jobs_request("POST", "/jobs", json=j.model_dump()).json(), status_code=202)
+
+
+@app.get("/jobs")
+def list_jobs(limit: int = Query(50, le=200)):
+    return JSONResponse(jobs_request("GET", "/jobs", params={"limit": limit}).json())
+
+
+@app.get("/jobs/{job_id}/logs")
+def job_logs(job_id: str):
+    return Response(jobs_request("GET", f"/jobs/{job_id}/logs").text, media_type="text/plain")
+
+
+@app.get("/jobs/{job_id}")
+def job_detail(job_id: str):
+    return JSONResponse(jobs_request("GET", f"/jobs/{job_id}").json())
 
 
 @app.get("/a/{artifact_id}")
@@ -448,10 +525,11 @@ def _fmt_size(n: int) -> str:
     return f"{n}b" if n < 1024 else (f"{n / 1024:.1f}kb" if n < 1024**2 else f"{n / 1024**2:.1f}mb")
 
 
-def _page(title_cmd: str, sub: str, body: str) -> str:
+def _page(title_cmd: str, sub: str, body: str, refresh: int = 0) -> str:
+    meta_refresh = f"<meta http-equiv='refresh' content='{refresh}'>" if refresh else ""
     return (
         f"<!doctype html><html><head><meta charset='utf-8'><title>toolshed</title>"
-        f"<style>{_SHED_CSS}</style></head><body>"
+        f"{meta_refresh}<style>{_SHED_CSS}</style></head><body>"
         f"<h1>{title_cmd}</h1><div class='sub'>{sub}</div>{body}</body></html>"
     )
 
@@ -480,7 +558,7 @@ def shed_home():
         + "</table>"
         + f"<div class='sub' style='margin-top:2em'>storage: "
         f"<a href='/shed/artifacts'>{len(rows)} artifact{'s' if len(rows) != 1 else ''}</a> · "
-        f"{_fmt_size(sum(r['size'] for r in rows))}</div>"
+        f"{_fmt_size(sum(r['size'] for r in rows))} · <a href='/shed/jobs'>jobs</a></div>"
     )
     return _page("$ ls ~/toolshed", f"{len(_TOOL_ROSTER)} tools · self-hosted · no quotas", body)
 
@@ -515,6 +593,55 @@ def shed_artifacts():
         f"<a href='/shed'>&larr; shed</a> · {len(rows)} artifact{'s' if len(rows) != 1 else ''} · {total} · "
         "immutable · deletion is human-only",
         table,
+    )
+
+
+_STATE_COLORS = {
+    "done": "var(--mallard)",
+    "running": "var(--lantern)",
+    "queued": "var(--reed)",
+    "capped": "var(--lantern)",
+    "error": "#e05252",
+}
+
+
+@app.get("/shed/jobs", response_class=HTMLResponse)
+def shed_jobs():
+    try:
+        jobs = jobs_request("GET", "/jobs", params={"limit": 100}).json()
+    except HTTPException as e:
+        return _page("$ jobs", f"<a href='/shed'>&larr; shed</a> · unreachable: {html_mod.escape(str(e.detail))}", "", refresh=10)
+    if jobs:
+        def _links(j: dict) -> str:
+            arts = " ".join(
+                f"<a href='{u}'>a{i + 1}</a>" for i, u in enumerate(j["artifact_urls"])
+            )
+            return f"{arts} <a href='/jobs/{j['id']}/logs'>logs</a>"
+
+        rows = "".join(
+            f"<tr>"
+            f"<td><span style='color:{_STATE_COLORS.get(j['state'], 'var(--bone)')}'>{j['state']}</span>"
+            f"<div class='guid'>{j['id']}</div></td>"
+            f"<td>{html_mod.escape((j['prompt'] or '')[:120])}</td>"
+            f"<td class='type'>{j['model']}/{j['image']}</td>"
+            f"<td>{j['turns']}t · {j['tokens'] // 1000}k</td>"
+            f"<td class='guid'>{j['created']}</td>"
+            f"<td>{_links(j)}</td>"
+            f"</tr>"
+            for j in jobs
+        )
+        table = (
+            "<table><tr><th>state</th><th>prompt</th><th>model</th><th>usage</th>"
+            "<th>created</th><th>links</th></tr>" + rows + "</table>"
+        )
+    else:
+        table = "<div class='empty'>no jobs yet — POST /jobs or use the run_job MCP tool</div>"
+    return _page(
+        "$ jobs",
+        f"<a href='/shed'>&larr; shed</a> · {len(jobs)} job{'s' if len(jobs) != 1 else ''} · "
+        "ephemeral agents in throwaway containers",
+        table,
+        refresh=10,
     )
 
 
