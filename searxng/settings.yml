@@ -16,7 +16,8 @@ search:
     - html
     - json
   safe_search: 0
-  autocomplete: ""
+  autocomplete: "duckduckgo"
+  autocomplete_min: 2
 
 engines:
   - name: google
