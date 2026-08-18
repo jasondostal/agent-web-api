@@ -1,6 +1,6 @@
 """jobs — orchestrator for ephemeral agent job containers.
 
-Runs on the dev box next to dockerd (sock mounted); toolshed proxies /jobs
+Runs on the dev box next to dockerd (sock mounted); agent-tools proxies /jobs
 here so the public face stays one hostname. This service is trusted code —
 the agent containers it launches never see the docker sock.
 
@@ -29,7 +29,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 DB_PATH = os.environ.get("DB_PATH", "/data/jobs.db")
-TOOLSHED_URL = os.environ.get("TOOLSHED_URL", "https://web.homelab.example")
+AGENT_TOOLS_URL = os.environ.get("AGENT_TOOLS_URL") or os.environ.get(
+    "TOOLSHED_URL", "https://web.homelab.example"
+)
 JOBS_URL_FOR_RUNNER = os.environ.get("JOBS_URL_FOR_RUNNER", "http://jobs-host.homelab.example:8815")
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "3"))
 WALL_CLOCK_SECS = int(os.environ.get("WALL_CLOCK_SECS", "1800"))
@@ -129,7 +131,9 @@ def run_job(job_id: str) -> None:
         "MODEL_BASE_URL": route["base_url"],
         "MODEL_NAME": route["model"],
         "MODEL_API_KEY": os.environ.get(route["key_env"], "") if route["key_env"] else "",
-        "TOOLSHED_URL": TOOLSHED_URL,
+        "AGENT_TOOLS_URL": AGENT_TOOLS_URL,
+        # legacy name so pre-rename runner images still resolve the stack
+        "TOOLSHED_URL": AGENT_TOOLS_URL,
         "JOBS_URL": JOBS_URL_FOR_RUNNER,
         "JOB_ID": job_id,
         "JOB_PROMPT": row["prompt"],

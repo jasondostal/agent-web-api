@@ -3,13 +3,14 @@
 Plain OpenAI-compatible chat-completions function-calling loop over httpx.
 No framework. The container is the sandbox: this process gets unrestricted
 bash and file access inside /workspace with no permission prompts. The only
-doors out are the model API and toolshed.
+doors out are the model API and agent-tools.
 
 Config via env:
   MODEL_BASE_URL    e.g. https://api.deepseek.com/v1
   MODEL_NAME        e.g. deepseek-v4-pro
   MODEL_API_KEY
-  TOOLSHED_URL      e.g. https://web.homelab.example (search/fetch/artifacts)
+  AGENT_TOOLS_URL   e.g. https://web.homelab.example (search/fetch/artifacts;
+                    legacy name TOOLSHED_URL still accepted)
   JOB_PROMPT        the task
   JOB_ID            optional; included in artifact titles + progress reports
   JOBS_URL          optional; PATCH {JOBS_URL}/jobs/{JOB_ID} progress each turn
@@ -33,7 +34,9 @@ import httpx
 MODEL_BASE_URL = os.environ["MODEL_BASE_URL"].rstrip("/")
 MODEL_NAME = os.environ["MODEL_NAME"]
 MODEL_API_KEY = os.environ.get("MODEL_API_KEY", "")
-TOOLSHED_URL = os.environ["TOOLSHED_URL"].rstrip("/")
+AGENT_TOOLS_URL = (
+    os.environ.get("AGENT_TOOLS_URL") or os.environ["TOOLSHED_URL"]
+).rstrip("/")
 JOB_PROMPT = os.environ["JOB_PROMPT"]
 JOB_ID = os.environ.get("JOB_ID", "")
 JOBS_URL = os.environ.get("JOBS_URL", "").rstrip("/")
@@ -214,7 +217,7 @@ def tool_write_file(path: str, content: str) -> str:
 
 
 def tool_web_search(query: str) -> str:
-    r = http.get(f"{TOOLSHED_URL}/search", params={"q": query, "format": "json"}, timeout=30)
+    r = http.get(f"{AGENT_TOOLS_URL}/search", params={"q": query, "format": "json"}, timeout=30)
     r.raise_for_status()
     results = r.json().get("results", [])[:8]
     if not results:
@@ -227,7 +230,7 @@ def tool_web_search(query: str) -> str:
 
 
 def tool_web_fetch(url: str) -> str:
-    r = http.get(f"{TOOLSHED_URL}/fetch", params={"url": url}, timeout=60)
+    r = http.get(f"{AGENT_TOOLS_URL}/fetch", params={"url": url}, timeout=60)
     if r.status_code != 200:
         return f"web_fetch failed: HTTP {r.status_code}: {r.text[:500]}"
     d = r.json()
@@ -237,7 +240,7 @@ def tool_web_fetch(url: str) -> str:
 
 def tool_store_artifact(content: str, title: str, content_type: str = "text/markdown") -> str:
     r = http.post(
-        f"{TOOLSHED_URL}/artifacts",
+        f"{AGENT_TOOLS_URL}/artifacts",
         json={"content": content, "title": title, "content_type": content_type},
         timeout=30,
     )

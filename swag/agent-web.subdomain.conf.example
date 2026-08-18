@@ -1,5 +1,6 @@
-## Version 2026/08/12 — agent web access: SearXNG (search) + trafilatura-api (fetch)
-# Single host, path-routed: /fetch + /healthz -> trafilatura-api, rest -> searxng.
+## agent web access: SearXNG (search) + agent-tools (fetch/artifacts/jobs/MCP)
+# Single host, path-routed: /fetch, /tools, /artifacts, /a/, /jobs, /healthz -> agent-tools;
+# /mcp -> agent-tools with buffering off (SSE); everything else -> searxng.
 # JSON search API: https://web.homelab.example/search?q=...&format=json
 
 server {
@@ -18,12 +19,13 @@ server {
 
     client_max_body_size 0;
 
-    # trafilatura-api — URL -> clean markdown (proxy.conf read timeout 240s covers
-    # slow origin sites).
-    location ~ ^/(fetch|healthz) {
+    # agent-tools — fetch/extract (PDF-capable), artifact store, jobs front door,
+    # /tools admin UI (proxy.conf read timeout 240s covers slow origin sites).
+    # /shed is a legacy path the app 301s to /tools.
+    location ~ ^/(fetch|healthz|artifacts|a/|tools|shed|jobs) {
         include /config/nginx/proxy.conf;
         include /config/nginx/resolver.conf;
-        set $upstream_app trafilatura-api;
+        set $upstream_app agent-tools;
         set $upstream_port 8080;
         set $upstream_proto http;
         proxy_pass $upstream_proto://$upstream_app:$upstream_port;
@@ -34,7 +36,7 @@ server {
     location /mcp {
         include /config/nginx/proxy.conf;
         include /config/nginx/resolver.conf;
-        set $upstream_app trafilatura-api;
+        set $upstream_app agent-tools;
         set $upstream_port 8080;
         set $upstream_proto http;
         proxy_pass $upstream_proto://$upstream_app:$upstream_port;

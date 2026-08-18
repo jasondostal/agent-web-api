@@ -1,4 +1,4 @@
-"""toolshed — self-hosted web tools for coding agents.
+"""agent-tools — self-hosted web tools for coding agents.
 
 Capabilities:
   web_search      → SearXNG metasearch (proxied via SEARXNG_URL)
@@ -45,9 +45,11 @@ PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "http://localhost:8080").rstrip("/")
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
 ARTIFACTS_DIR = os.path.join(DATA_DIR, "artifacts")
+# Filename predates the agent-tools rename; keeping it so existing /data
+# volumes keep their artifacts.
 DB_PATH = os.path.join(DATA_DIR, "toolshed.db")
 
-USER_AGENT = "Mozilla/5.0 (compatible; toolshed/0.3; +self-hosted agent tools)"
+USER_AGENT = "Mozilla/5.0 (compatible; agent-tools/0.5; +self-hosted agent tools)"
 
 TimeRange = Literal["day", "week", "month", "year"]
 
@@ -288,7 +290,7 @@ def jobs_request(method: str, path: str, **kw):
 # --- MCP transport ---------------------------------------------------------
 
 mcp = FastMCP(
-    "toolshed",
+    "agent-tools",
     instructions="Self-hosted agent tools: web_search (SearXNG metasearch), "
     "web_fetch (URL to markdown, handles PDFs), and an artifact store for "
     "saving/sharing documents at stable URLs. LAN-hosted, no quotas — use freely.",
@@ -415,7 +417,7 @@ mcp_app = mcp.http_app(path="/mcp")
 # REST while everything else (i.e. /mcp) falls through to the MCP app.
 
 app = FastAPI(
-    title="toolshed",
+    title="agent-tools",
     docs_url="/fetch/docs",
     openapi_url="/fetch/openapi.json",
     lifespan=mcp_app.lifespan,
@@ -492,19 +494,22 @@ def serve_artifact(artifact_id: str):
     return Response(content=content, media_type=ctype, headers=headers)
 
 
-# --- admin: the shed inventory ---------------------------------------------
+# --- admin: tools inventory ------------------------------------------------
 # Zero-JS on purpose (strict CSP proxies silently kill inline scripts).
 # Deletion is deliberately human-only: there is no MCP delete tool — agents
 # can publish artifacts, only a person at this page can destroy them.
 
-_SHED_CSS = """
+_CSS = """
 :root{--night:#081210;--panel:#0d1a16;--line:#1c312a;--mallard:#2bd98e;
 --lantern:#ffb454;--bone:#d8e7de;--reed:#5f7a6e}
 *{box-sizing:border-box;margin:0}
 body{background:var(--night);color:var(--bone);font-family:ui-monospace,Menlo,monospace;
 padding:2.5em 1.5em;max-width:1000px;margin:0 auto}
 h1{color:var(--mallard);font-size:1.3em;margin-bottom:.25em}
+h2{color:var(--lantern);font-size:.9em;text-transform:uppercase;letter-spacing:.08em;
+margin:2em 0 .75em}
 .sub{color:var(--reed);margin-bottom:2em}
+p{margin-bottom:.75em;line-height:1.5}
 table{width:100%;border-collapse:collapse}
 th{color:var(--lantern);text-align:left;padding:.5em .75em;border-bottom:1px solid var(--line);
 font-size:.85em;text-transform:uppercase;letter-spacing:.08em}
@@ -512,6 +517,8 @@ td{padding:.55em .75em;border-bottom:1px solid var(--line);font-size:.9em;vertic
 tr:hover td{background:var(--panel)}
 a{color:var(--mallard);text-decoration:none}
 a:hover{text-decoration:underline}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:4px;
+padding:1em;font-size:.85em;line-height:1.5;overflow-x:auto;margin-bottom:.75em}
 .guid{color:var(--reed);font-size:.8em}
 .type{color:var(--lantern);font-size:.8em}
 .del button{background:none;border:1px solid var(--line);color:var(--reed);
@@ -525,12 +532,13 @@ def _fmt_size(n: int) -> str:
     return f"{n}b" if n < 1024 else (f"{n / 1024:.1f}kb" if n < 1024**2 else f"{n / 1024**2:.1f}mb")
 
 
-def _page(title_cmd: str, sub: str, body: str, refresh: int = 0) -> str:
+def _page(title: str, sub: str, body: str, refresh: int = 0) -> str:
     meta_refresh = f"<meta http-equiv='refresh' content='{refresh}'>" if refresh else ""
+    tab = title if title == "agent-tools" else f"{title} · agent-tools"
     return (
-        f"<!doctype html><html><head><meta charset='utf-8'><title>toolshed</title>"
-        f"{meta_refresh}<style>{_SHED_CSS}</style></head><body>"
-        f"<h1>{title_cmd}</h1><div class='sub'>{sub}</div>{body}</body></html>"
+        f"<!doctype html><html><head><meta charset='utf-8'><title>{html_mod.escape(tab)}</title>"
+        f"{meta_refresh}<style>{_CSS}</style></head><body>"
+        f"<h1>{html_mod.escape(title)}</h1><div class='sub'>{sub}</div>{body}</body></html>"
     )
 
 
@@ -539,32 +547,78 @@ import asyncio as _asyncio
 # Snapshot the MCP tool roster once at import — tools are compiled in, the
 # roster can't change at runtime.
 _TOOL_ROSTER = [
-    (t.name, (t.description or "").split("\n")[0].strip())
+    {
+        "name": t.name,
+        "summary": " ".join((t.description or "").split()).partition(". ")[0].rstrip(".") + ".",
+        "description": " ".join((t.description or "").split()),
+        "schema": getattr(t, "parameters", None) or {},
+    }
     for t in _asyncio.run(mcp.list_tools())
 ]
+_TOOLS_BY_NAME = {t["name"]: t for t in _TOOL_ROSTER}
+
+# REST equivalents shown on each tool's page. Everything is also served over
+# MCP at /mcp; these are the plain-curl spellings.
+_REST_EXAMPLES = {
+    "web_search": "curl '{base}/search?q=self-hosted+metasearch&format=json'",
+    "web_fetch": "curl '{base}/fetch?url=https://example.com'",
+    "store_artifact": (
+        "curl -X POST {base}/artifacts -H 'content-type: application/json' \\\n"
+        "  -d '{{\"title\": \"notes\", \"content\": \"# hello\", "
+        "\"content_type\": \"text/markdown\"}}'"
+    ),
+    "get_artifact": "curl {base}/a/<artifact-id>",
+    "list_artifacts": "curl '{base}/artifacts?limit=20'",
+    "run_job": (
+        "curl -X POST {base}/jobs -H 'content-type: application/json' \\\n"
+        "  -d '{{\"prompt\": \"research X and store a report\", \"model\": \"deepseek\"}}'"
+    ),
+    "job_status": "curl {base}/jobs/<job-id>",
+}
+
+_MCP_CONFIG_SNIPPET = (
+    '{\n  "mcpServers": {\n    "agent-tools": { "url": "%s/mcp" }\n  }\n}' % PUBLIC_BASE
+)
 
 
-@app.get("/shed", response_class=HTMLResponse)
-def shed_home():
+def _schema_type(prop: dict) -> str:
+    """Human-readable type from a JSON-schema property (handles anyOf/enum)."""
+    if "enum" in prop:
+        return " | ".join(str(v) for v in prop["enum"])
+    if "anyOf" in prop:
+        parts = [_schema_type(p) for p in prop["anyOf"]]
+        return " | ".join(p for p in parts if p and p != "null")
+    return prop.get("type", "")
+
+
+@app.get("/tools", response_class=HTMLResponse)
+def tools_home():
     rows = recent_artifacts(1000)
     tools = "".join(
-        f"<tr><td><a href='/mcp'>{name}</a></td><td class='type'>mcp + rest</td>"
-        f"<td>{html_mod.escape(desc)}</td></tr>"
-        for name, desc in _TOOL_ROSTER
+        f"<tr><td><a href='/tools/{t['name']}'>{t['name']}</a></td>"
+        f"<td class='type'>{'mcp · rest' if t['name'] in _REST_EXAMPLES else 'mcp'}</td>"
+        f"<td>{html_mod.escape(t['summary'])}</td></tr>"
+        for t in _TOOL_ROSTER
     )
     body = (
         "<table><tr><th>tool</th><th>transport</th><th>description</th></tr>"
         + tools
         + "</table>"
         + f"<div class='sub' style='margin-top:2em'>storage: "
-        f"<a href='/shed/artifacts'>{len(rows)} artifact{'s' if len(rows) != 1 else ''}</a> · "
-        f"{_fmt_size(sum(r['size'] for r in rows))} · <a href='/shed/jobs'>jobs</a></div>"
+        f"<a href='/tools/artifacts'>{len(rows)} artifact{'s' if len(rows) != 1 else ''}</a> · "
+        f"{_fmt_size(sum(r['size'] for r in rows))} · <a href='/tools/jobs'>jobs</a></div>"
+        + "<h2>connect over mcp</h2>"
+        f"<pre>{html_mod.escape(_MCP_CONFIG_SNIPPET)}</pre>"
     )
-    return _page("$ ls ~/toolshed", f"{len(_TOOL_ROSTER)} tools · self-hosted · no quotas", body)
+    return _page(
+        "agent-tools",
+        f"{len(_TOOL_ROSTER)} tools · self-hosted web search, fetch, artifacts, jobs · no quotas",
+        body,
+    )
 
 
-@app.get("/shed/artifacts", response_class=HTMLResponse)
-def shed_artifacts():
+@app.get("/tools/artifacts", response_class=HTMLResponse)
+def tools_artifacts():
     rows = recent_artifacts(200)
     total = _fmt_size(sum(r["size"] for r in rows))
     if rows:
@@ -575,7 +629,7 @@ def shed_artifacts():
             f"<td class='type'>{html_mod.escape(r['content_type'])}</td>"
             f"<td>{_fmt_size(r['size'])}</td>"
             f"<td class='guid'>{r['created']}</td>"
-            f"<td class='del'><form method='post' action='/shed/delete'>"
+            f"<td class='del'><form method='post' action='/tools/delete'>"
             f"<input type='hidden' name='artifact_id' value='{r['id']}'>"
             f"<button>delete</button></form></td>"
             f"</tr>"
@@ -587,10 +641,10 @@ def shed_artifacts():
             + "</table>"
         )
     else:
-        table = "<div class='empty'>the shed is empty — agents haven't stored anything yet</div>"
+        table = "<div class='empty'>no artifacts yet — agents haven't stored anything</div>"
     return _page(
-        "$ ls ~/toolshed/artifacts",
-        f"<a href='/shed'>&larr; shed</a> · {len(rows)} artifact{'s' if len(rows) != 1 else ''} · {total} · "
+        "artifacts",
+        f"<a href='/tools'>&larr; tools</a> · {len(rows)} artifact{'s' if len(rows) != 1 else ''} · {total} · "
         "immutable · deletion is human-only",
         table,
     )
@@ -605,12 +659,12 @@ _STATE_COLORS = {
 }
 
 
-@app.get("/shed/jobs", response_class=HTMLResponse)
-def shed_jobs():
+@app.get("/tools/jobs", response_class=HTMLResponse)
+def tools_jobs():
     try:
         jobs = jobs_request("GET", "/jobs", params={"limit": 100}).json()
     except HTTPException as e:
-        return _page("$ jobs", f"<a href='/shed'>&larr; shed</a> · unreachable: {html_mod.escape(str(e.detail))}", "", refresh=10)
+        return _page("jobs", f"<a href='/tools'>&larr; tools</a> · unreachable: {html_mod.escape(str(e.detail))}", "", refresh=10)
     if jobs:
         def _links(j: dict) -> str:
             arts = " ".join(
@@ -637,18 +691,91 @@ def shed_jobs():
     else:
         table = "<div class='empty'>no jobs yet — POST /jobs or use the run_job MCP tool</div>"
     return _page(
-        "$ jobs",
-        f"<a href='/shed'>&larr; shed</a> · {len(jobs)} job{'s' if len(jobs) != 1 else ''} · "
+        "jobs",
+        f"<a href='/tools'>&larr; tools</a> · {len(jobs)} job{'s' if len(jobs) != 1 else ''} · "
         "ephemeral agents in throwaway containers",
         table,
         refresh=10,
     )
 
 
-@app.post("/shed/delete")
-def shed_delete(artifact_id: str = Form(...)):
+@app.post("/tools/delete")
+def tools_delete(artifact_id: str = Form(...)):
     delete_artifact(_normalize_artifact_id(artifact_id))
-    return RedirectResponse("/shed/artifacts", status_code=303)
+    return RedirectResponse("/tools/artifacts", status_code=303)
+
+
+@app.get("/tools/{tool_name}", response_class=HTMLResponse)
+def tool_detail(tool_name: str):
+    t = _TOOLS_BY_NAME.get(tool_name)
+    if t is None:
+        raise HTTPException(404, f"no such tool: {tool_name}")
+    props = t["schema"].get("properties", {})
+    required = set(t["schema"].get("required", []))
+    if props:
+        param_rows = "".join(
+            f"<tr><td>{name}</td>"
+            f"<td class='type'>{html_mod.escape(_schema_type(p))}</td>"
+            f"<td class='guid'>{'required' if name in required else 'default: ' + repr(p.get('default'))}</td>"
+            f"</tr>"
+            for name, p in props.items()
+        )
+        params = (
+            "<h2>parameters</h2><table><tr><th>name</th><th>type</th><th></th></tr>"
+            + param_rows
+            + "</table>"
+        )
+    else:
+        params = "<h2>parameters</h2><div class='sub'>none</div>"
+    sections = [f"<p>{html_mod.escape(t['description'])}</p>", params]
+    if t["name"] in _REST_EXAMPLES:
+        sections.append(
+            "<h2>rest</h2><pre>"
+            + html_mod.escape(_REST_EXAMPLES[t["name"]].format(base=PUBLIC_BASE))
+            + "</pre>"
+        )
+    sections.append(
+        "<h2>mcp</h2>"
+        f"<p class='guid'>served at {PUBLIC_BASE}/mcp (Streamable HTTP)</p>"
+        f"<pre>{html_mod.escape(_MCP_CONFIG_SNIPPET)}</pre>"
+    )
+    return _page(
+        t["name"],
+        f"<a href='/tools'>&larr; tools</a> · "
+        f"{'mcp · rest' if t['name'] in _REST_EXAMPLES else 'mcp only'}",
+        "".join(sections),
+    )
+
+
+# Old theme-era paths: permanent redirects so bookmarks keep working.
+@app.get("/shed")
+@app.get("/shed/{rest:path}")
+def shed_redirect(rest: str = ""):
+    return RedirectResponse(f"/tools/{rest}" if rest else "/tools", status_code=301)
+
+
+# A browser GET on /mcp used to land on a bare JSON-RPC error — MCP endpoints
+# only speak Streamable HTTP. Serve humans an explainer instead; real MCP
+# clients (Accept: text/event-stream) pass through to the mounted app.
+@app.middleware("http")
+async def mcp_browser_explainer(request: Request, call_next):
+    accept = request.headers.get("accept", "")
+    if (
+        request.url.path.rstrip("/") == "/mcp"
+        and request.method == "GET"
+        and "text/html" in accept
+        and "text/event-stream" not in accept
+    ):
+        body = (
+            "<p>This is an MCP endpoint (Streamable HTTP). It speaks JSON-RPC to MCP "
+            "clients — there's nothing to see in a browser.</p>"
+            "<h2>connect a client</h2>"
+            f"<pre>{html_mod.escape(_MCP_CONFIG_SNIPPET)}</pre>"
+            "<p class='guid'>Works with Claude Code, LM Studio, and anything MCP-native. "
+            f"Tool roster and examples: <a href='/tools'>{PUBLIC_BASE}/tools</a></p>"
+        )
+        return HTMLResponse(_page("/mcp", "MCP endpoint · not a web page", body))
+    return await call_next(request)
 
 
 @app.delete("/artifacts/{artifact_id}")

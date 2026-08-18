@@ -5,7 +5,7 @@
 Coding agents want two web capabilities: *search* (query → ranked URLs) and *fetch* (URL → clean
 markdown). The hosted options — Brave Search API, Exa, Tavily, Firecrawl — are metered cloud
 services. This repo is the ~$0 homelab alternative: [SearXNG](https://github.com/searxng/searxng)
-for the search half and **toolshed** — a small FastAPI service wrapping
+for the search half and **agent-tools** — a small FastAPI service wrapping
 [trafilatura](https://github.com/adbar/trafilatura) (HTML) and
 [pymupdf4llm](https://github.com/pymupdf/RAG) (PDF) for the fetch half, plus a
 Claude-style artifact store (immutable documents at unguessable capability URLs) — one reverse-proxy vhost
@@ -20,17 +20,18 @@ One internal hostname (examples below use `web.homelab.example`), path-routed at
 |------|---------|---------|
 | `/` | searxng | Search UI (browser) |
 | `/search?q=...&format=json` | searxng | JSON search API (agents) |
-| `/fetch?url=...` | toolshed | URL → clean markdown JSON (HTML or PDF) |
-| `/mcp` | toolshed | MCP (Streamable HTTP): `web_search`, `web_fetch`, `store_artifact`, `get_artifact`, `list_artifacts` |
-| `/a/{id}` | toolshed | Serve a stored artifact (renders in browser) |
-| `/artifacts` | toolshed | Store (POST) / list (GET) artifacts |
-| `/healthz` | toolshed | Liveness |
-| `/jobs` | toolshed → jobs | Submit/inspect ephemeral agent jobs (see below) |
+| `/fetch?url=...` | agent-tools | URL → clean markdown JSON (HTML or PDF) |
+| `/mcp` | agent-tools | MCP (Streamable HTTP): `web_search`, `web_fetch`, `store_artifact`, `get_artifact`, `list_artifacts` |
+| `/tools` | agent-tools | Human-facing inventory: tool roster, per-tool docs with curl/MCP examples, artifact + job admin |
+| `/a/{id}` | agent-tools | Serve a stored artifact (renders in browser) |
+| `/artifacts` | agent-tools | Store (POST) / list (GET) artifacts |
+| `/healthz` | agent-tools | Liveness |
+| `/jobs` | agent-tools → jobs | Submit/inspect ephemeral agent jobs (see below) |
 
 - **SearXNG** — metasearch over Google/Bing/DDG/Brave. Its rate limiter is OFF on purpose: the
   limiter's bot detection blocks exactly the non-browser JSON calls agents make. Access control
   belongs at the proxy (LAN allow-list) instead. Config in `searxng/settings.yml`.
-- **toolshed** (`toolshed/`) — FastAPI + FastMCP. `web_fetch` returns title/author/date + markdown
+- **agent-tools** (`agent-tools/`) — FastAPI + FastMCP. `web_fetch` returns title/author/date + markdown
   for HTML pages and PDFs (content-type sniffed).
   SSRF guard refuses private/loopback targets so a prompt-injected agent can't probe your LAN
   through it (`ALLOW_PRIVATE=1` to disable). `MAX_CONTENT_CHARS` truncates (default 400k).
@@ -51,12 +52,12 @@ searxng:
     - ./searxng:/etc/searxng
   mem_limit: 512m
 
-toolshed:
-  build: ./toolshed
+agent-tools:
+  build: ./agent-tools
   environment:
     - PUBLIC_BASE=https://web.homelab.example
   volumes:
-    - ./data/toolshed:/data
+    - ./data/agent-tools:/data
   # external DNS if your LAN resolver runs blocklists — ad-list entries
   # break legit article fetches
   dns: [1.1.1.1, 8.8.8.8]
@@ -72,18 +73,18 @@ toolshed:
 ## MCP clients (Claude Code, LM Studio, anything MCP-native)
 
 The same two tools are served over MCP Streamable HTTP at `/mcp` — [FastMCP](https://github.com/jlowin/fastmcp)
-mounted inside the toolshed container, no extra service. Point any MCP host at it:
+mounted inside the agent-tools container, no extra service. Point any MCP host at it:
 
 ```json
 {
   "mcpServers": {
-    "homelab-web": { "url": "https://web.homelab.example/mcp" }
+    "agent-tools": { "url": "https://web.homelab.example/mcp" }
   }
 }
 ```
 
 LM Studio: Program tab → Install → Edit mcp.json (0.3.17+). Claude Code:
-`claude mcp add --transport http homelab-web https://web.homelab.example/mcp`.
+`claude mcp add --transport http agent-tools https://web.homelab.example/mcp`.
 Keep the endpoint LAN-only at the proxy; the MCP layer itself is unauthenticated.
 
 ## pi integration
@@ -106,30 +107,30 @@ results to the artifact store, and evaporates. The design principle: **capabilit
 outside, full power on the inside.** The container *is* the sandbox — inside it the agent gets
 unrestricted bash/files/pytest (the `full` image adds Playwright + Chromium) with no permission
 prompts. Blast radius = the container: no host mounts, memory/CPU caps, wall-clock timeout,
-removed after log capture. The only doors out are the model API and toolshed.
+removed after log capture. The only doors out are the model API and agent-tools.
 
 Three parts:
 
 - **`runner/`** — `runner.py`, a plain OpenAI-compatible function-calling loop (httpx, no
   framework) baked into `job-runner:lite` (python + git + pytest + node) and `job-runner:full`
   (+ Playwright/Chromium). Tools: `bash`, `read_file`/`write_file` (workspace-jailed),
-  `web_search`/`web_fetch`/`store_artifact` (via toolshed), `done`. Hard caps on turns and
+  `web_search`/`web_fetch`/`store_artifact` (via agent-tools), `done`. Hard caps on turns and
   total tokens; every exit path stores a report artifact (`[DONE]`/`[CAPPED]`/`[ERROR]`) — a
   job never evaporates without a trace.
 - **`jobs/`** — FastAPI orchestrator that owns the docker sock (the *agent* never sees it).
   FIFO queue, fixed concurrency (default 3), wall clock kill (default 30min), SQLite job
   history with captured logs. Runs on whatever box should host the containers — it doesn't
-  have to be the toolshed host. Model routing (`deepseek`/`mimo`/`lmstudio`) maps a job's
+  have to be the agent-tools host. Model routing (`deepseek`/`mimo`/`lmstudio`) maps a job's
   `model` to a base URL + API key from the orchestrator's env; keys are injected per-container,
   never baked into images.
-- **Toolshed front door** — proxies `POST/GET /jobs` to the orchestrator, serves a zero-JS
-  `/shed/jobs` status page, and exposes `run_job` + `job_status` MCP tools. Yes, that means
+- **agent-tools front door** — proxies `POST/GET /jobs` to the orchestrator, serves a zero-JS
+  `/tools/jobs` status page, and exposes `run_job` + `job_status` MCP tools. Yes, that means
   agents can spawn agents; the caps are what make that sane.
 
 ```bash
 curl -X POST https://web.homelab.example/jobs -H 'Content-Type: application/json' \
   -d '{"prompt": "write fizzbuzz + tests, run pytest, store a report", "image": "lite"}'
-# → {"job_id": "..."}  — watch /shed/jobs, artifacts land in /shed/artifacts
+# → {"job_id": "..."}  — watch /tools/jobs, artifacts land in /tools/artifacts
 ```
 
 Accepted v1 tradeoffs: job containers get normal egress (a prompt-injected agent could probe
